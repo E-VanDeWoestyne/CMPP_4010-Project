@@ -1,5 +1,11 @@
-from ultralytics import YOLOvv11
+from ultralytics import YOLO
 
-model = YOLOvv11.from_pretrained("EFFGRP/yolov11n-warehouse-pallets-960")
-source = 'http://images.cocodataset.org/val2017/000000039769.jpg'
-model.predict(source=source, save=True)
+model = YOLO("EFFGRP/yolov11s-warehouse-pallets-640")
+results = model.predict("Image1.jpg", conf=0.25, save=True)
+
+for result in results:
+    for box in result.boxes:
+        cls_id = int(box.cls[0])
+        confidence = float(box.conf[0])
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        print(f"Pallet detected: conf={confidence:.2f}, bbox=({x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f})")
