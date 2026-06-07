@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch, mock_open
 from pathlib import Path
 import math
 
-from oop_project import (
+from roject import (
     BoundingBox,
     CameraParameters,
     PalletDetection,
@@ -22,7 +22,7 @@ class TestBoundingBox(unittest.TestCase):
 
 class TestCameraParameters(unittest.TestCase):
     def setUp(self):
-        self.camera = CameraParameters(assumed_depth_m=5.0, horizontal_fov_deg=60.0)
+        self.camera = CameraParameters(depth_m=5.0, horizontal_fov_deg=60.0)
 
     def test_calculate_focal_length(self):
         # focal_length = (width / 2) / tan(fov / 2)
@@ -40,7 +40,7 @@ class TestCameraParameters(unittest.TestCase):
 
 class TestPalletDetection(unittest.TestCase):
     def setUp(self):
-        self.camera = CameraParameters(assumed_depth_m=5.0, horizontal_fov_deg=60.0)
+        self.camera = CameraParameters(depth_m=5.0, horizontal_fov_deg=60.0)
         self.bbox = BoundingBox(x1=100.0, y1=100.0, x2=200.0, y2=200.0)
         # width_px = sqrt(100^2 + 100^2) = sqrt(20000) ~ 141.421356
         # height_px = 200 - 100 = 100
@@ -75,7 +75,7 @@ class TestPalletDetection(unittest.TestCase):
 
 
 class TestPalletDetector(unittest.TestCase):
-    @patch("oop_project.YOLO")
+    @patch("project.YOLO")
     def test_detect_parses_results_correctly(self, mock_yolo_cls):
         # Set up mock YOLO instance
         mock_yolo_instance = MagicMock()
@@ -113,20 +113,20 @@ class TestPalletDetector(unittest.TestCase):
 
 
 class TestBatchProcessor(unittest.TestCase):
-    @patch("oop_project.Path.glob")
+    @patch("project.Path.glob")
     def test_get_images(self, mock_glob):
-        mock_glob.return_value = [Path("Image4.jpg"), Path("Image3.jpg")]
+        mock_glob.return_value = [Path("images/Image4.jpg"), Path("images/Image3.jpg")]
         
         detector = MagicMock()
         processor = BatchProcessor(detector=detector, image_pattern="Image*", output_file="results.txt")
         images = processor.get_images()
 
-        self.assertEqual(images, [Path("Image3.jpg"), Path("Image4.jpg")]) # Should be sorted
+        self.assertEqual(images, [Path("images/Image3.jpg"), Path("images/Image4.jpg")]) # Should be sorted
 
-    @patch("oop_project.Path.glob")
+    @patch("project.Path.glob")
     @patch("builtins.open", new_callable=mock_open)
     def test_process_runs_pipeline(self, mock_file, mock_glob):
-        mock_glob.return_value = [Path("Image4.jpg")]
+        mock_glob.return_value = [Path("images/Image4.jpg")]
         
         # Mock detector and a detection
         mock_detector = MagicMock()
@@ -137,7 +137,7 @@ class TestBatchProcessor(unittest.TestCase):
         processor = BatchProcessor(detector=mock_detector, image_pattern="Image4.jpg", output_file="test_results.txt")
         processor.process()
 
-        mock_detector.detect.assert_called_once_with(Path("Image4.jpg"))
+        mock_detector.detect.assert_called_once_with(Path("images/Image4.jpg"))
         mock_detection.to_string.assert_called_once_with("Image4.jpg")
         
         # Verify writing to file

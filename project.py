@@ -14,8 +14,8 @@ class BoundingBox:
 
 class CameraParameters:
     """Encapsulates camera properties and physical geometry calculations."""
-    def __init__(self, assumed_depth_m: float = 5.0, horizontal_fov_deg: float = 60.0):
-        self.assumed_depth_m = assumed_depth_m
+    def __init__(self, depth_m: float = 5.0, horizontal_fov_deg: float = 60.0):
+        self.depth_m = depth_m
         self.horizontal_fov_deg = horizontal_fov_deg
 
     def calculate_focal_length(self, img_width: int) -> float:
@@ -24,7 +24,7 @@ class CameraParameters:
 
     def pixel_to_meters(self, pixels: float, focal_length: float) -> float:
         """Converts pixel measurements to real-world meters at the assumed depth."""
-        return (pixels * self.assumed_depth_m) / focal_length
+        return (pixels * self.depth_m) / focal_length
 
 
 class PalletDetection:
@@ -51,13 +51,13 @@ class PalletDetection:
             f"{image_name}: Pallet detected: conf={self.confidence:.2f}, "
             f"bbox=({self.bbox.x1:.0f},{self.bbox.y1:.0f},{self.bbox.x2:.0f},{self.bbox.y2:.0f}), "
             f"diagonal={self.diagonal_width_px:.1f}px, side_width={self.side_width_px:.1f}px, height={self.height_px:.1f}px | "
-            f"Real-world (at {self.camera.assumed_depth_m}m): side_width={self.side_width_m:.3f}m, height={self.height_m:.3f}m"
+            f"Real-world (at {self.camera.depth_m}m): side_width={self.side_width_m:.3f}m, height={self.height_m:.3f}m"
         )
 
 
 class PalletDetector:
     """Loads a YOLO model and returns structured PalletDetection objects."""
-    def __init__(self, model_path: str = "whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = 0.25, imgsz: int = 640):
+    def __init__(self, model_path: str = "models/whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = 0.25, imgsz: int = 640):
         self.model = YOLO(model_path)
         self.camera = camera or CameraParameters()
         self.conf = conf
@@ -90,14 +90,14 @@ class PalletDetector:
 
 class BatchProcessor:
     """Manages the process of running detections over multiple files and saving results."""
-    def __init__(self, detector: PalletDetector, image_pattern: str = "Image4.jpg", output_file: str = "results.txt"):
+    def __init__(self, detector: PalletDetector, image_pattern: str = "Image*", output_file: str = "results.txt"):
         self.detector = detector
         self.image_pattern = image_pattern
         self.output_file = output_file
 
     def get_images(self) -> list[Path]:
         """Globs and sorts images matching the pattern."""
-        return sorted(Path(".").glob(self.image_pattern))
+        return sorted(Path("./images").glob(self.image_pattern))
 
     def process(self):
         """Processes images, prints results, and saves them to the output file."""
@@ -114,11 +114,11 @@ class BatchProcessor:
 
 if __name__ == "__main__":
     # Configure parameters
-    camera = CameraParameters(assumed_depth_m=5.0, horizontal_fov_deg=60.0)
+    camera = CameraParameters()
     
     # Initialize services
-    detector = PalletDetector(model_path="whole_pallet_s_640.pt", camera=camera)
-    processor = BatchProcessor(detector=detector, image_pattern="Image*", output_file="oop_results.txt")
+    detector = PalletDetector(camera=camera)
+    processor = BatchProcessor(detector=detector)
     
     # Run prediction pipeline
     processor.process()

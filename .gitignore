@@ -8,4 +8,4 @@ venv/
 ENV/
 
 # Local results
-oop_results.txt
+results.txt
