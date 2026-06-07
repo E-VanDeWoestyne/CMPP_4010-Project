@@ -6,9 +6,9 @@ from ultralytics import YOLO
 # Used a combination of the quickstart guide on the huggingface model website: https://huggingface.co/EFFGRP/yolov11n-warehouse-pallets-960
 # as well as assistance from Copilot to help with bugfixing, the math, and 'fake camera' calculations into result.
 
-model = YOLO("whole_pallet_s_640.pt")
+model = YOLO("models/whole_pallet_s_640.pt")
 
-image_paths = sorted(Path(".").glob("Image4.jpg"))
+image_paths = sorted(Path(".").glob("images/Image4.jpg"))
 
 # Assumed camera parameters
 ASSUMED_DEPTH_M = 5.0  # pallet distance in meters
