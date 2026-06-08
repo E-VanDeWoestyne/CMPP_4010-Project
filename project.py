@@ -24,11 +24,19 @@ class CameraParameters:
 
 	def calculate_focal_length(self, img_width: int) -> float:
 		"""Calculates focal length in pixels using the horizontal FOV."""
-		return (img_width / 2.0) / math.tan(math.radians(self.horizontal_fov_deg) / 2.0)
+		try:
+			return (img_width / 2.0) / math.tan(math.radians(self.horizontal_fov_deg) / 2.0)
+		except ZeroDivisionError as e:
+			print(f"Error calculating focal length: {e}")
+			return None
 
 	def pixel_to_meters(self, pixels: float, focal_length: float) -> float:
 		"""Converts pixel measurements to real-world meters at the assumed depth."""
-		return (pixels * self.depth_m) / focal_length
+		try:
+			return (pixels * self.depth_m) / focal_length
+		except ZeroDivisionError as e:
+			print(f"Error converting pixels to meters: {e}")
+			return None
 
 
 class PalletDetection:
@@ -62,33 +70,46 @@ class PalletDetection:
 class PalletDetector:
 	"""Loads a YOLO model and returns structured PalletDetection objects."""
 	def __init__(self, model_path: str = "models/whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = 0.25, imgsz: int = 640):
-		self.model = YOLO(model_path)
+		try:
+			self.model = YOLO(model_path)
+		except Exception as e:
+			print(f"Error initializing YOLO model: {e}")
+			raise e
+
 		self.camera = camera or CameraParameters(depth_m=PROTOTYPE_DEPTH_M, horizontal_fov_deg=PROTOTYPE_FOV_DEG)
 		self.conf = conf
 		self.imgsz = imgsz
 
 	def detect(self, image_path: Path) -> list[PalletDetection]:
 		"""Runs prediction on an image and returns a list of PalletDetections."""
-		results = self.model.predict(str(image_path), conf=self.conf, imgsz=self.imgsz, save=False)
+		try:
+			results = self.model.predict(str(image_path), conf=self.conf, imgsz=self.imgsz, save=False)
+		except Exception as e:
+			print(f"Error during detection on {image_path}: {e}")
+			return []
+
 		detections = []
-
 		for result in results:
-			img_width = result.orig_img.shape[1]
-			for box in result.boxes:
-				cls_id = int(box.cls[0])
-				confidence = float(box.conf[0])
-				x1, y1, x2, y2 = box.xyxy[0].tolist()
+			try:
+				img_width = result.orig_img.shape[1]
+				for box in result.boxes:
+					cls_id = int(box.cls[0])
+					confidence = float(box.conf[0])
+					x1, y1, x2, y2 = box.xyxy[0].tolist()
 
-				bbox = BoundingBox(x1, y1, x2, y2)
-				detections.append(
-					PalletDetection(
-					bbox=bbox,
-					confidence=confidence,
-					class_id=cls_id,
-					img_width=img_width,
-					camera=self.camera
-				)
-				)
+					bbox = BoundingBox(x1, y1, x2, y2)
+					detections.append(
+						PalletDetection(
+						bbox=bbox,
+						confidence=confidence,
+						class_id=cls_id,
+						img_width=img_width,
+						camera=self.camera
+					)
+					)
+			except (AttributeError, TypeError) as e:
+				print(f"Error processing detection results for {image_path}: {e}")
+
 		return detections
 
 
@@ -109,13 +130,18 @@ class BatchProcessor:
 		"""Processes images, prints results, and saves them to the output file."""
 		image_paths = self.get_images()
 
-		with open(self.output_file, "w") as f:
-			for image_path in image_paths:
-				detections = self.detector.detect(image_path)
-				for detection in detections:
-					output_line = detection.to_string(image_path.name)
-					print(output_line)
-					f.write(output_line + "\n")
+		try:
+			with open(self.output_file, "w") as f:
+				for image_path in image_paths:
+					detections = self.detector.detect(image_path)
+					for detection in detections:
+						output_line = detection.to_string(image_path.name)
+						print(output_line)
+						f.write(output_line + "\n")
+			print(f"Results saved to {self.output_file}")
+		except OSError as e:
+			print(f"Error during batch processing: {e}")
+			raise e
 
 
 if __name__ == "__main__":
