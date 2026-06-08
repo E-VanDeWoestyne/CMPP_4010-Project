@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch, mock_open
 from pathlib import Path
 import math
 
-from roject import (
+from project import (
     BoundingBox,
     CameraParameters,
     PalletDetection,
