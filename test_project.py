@@ -118,7 +118,7 @@ class TestBatchProcessor(unittest.TestCase):
         mock_glob.return_value = [Path("images/Image4.jpg"), Path("images/Image3.jpg")]
         
         detector = MagicMock()
-        processor = BatchProcessor(detector=detector, image_pattern="Image*", output_file="results.txt")
+        processor = BatchProcessor(detector=detector, output_file="results.txt")
         images = processor.get_images()
 
         self.assertEqual(images, [Path("images/Image3.jpg"), Path("images/Image4.jpg")]) # Should be sorted
@@ -134,7 +134,7 @@ class TestBatchProcessor(unittest.TestCase):
         mock_detection.to_string.return_value = "formatted_output"
         mock_detector.detect.return_value = [mock_detection]
 
-        processor = BatchProcessor(detector=mock_detector, image_pattern="Image4.jpg", output_file="test_results.txt")
+        processor = BatchProcessor(detector=mock_detector, output_file="test_results.txt")
         processor.process()
 
         mock_detector.detect.assert_called_once_with(Path("images/Image4.jpg"))
