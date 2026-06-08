@@ -61,9 +61,9 @@ class PalletDetection:
 
 class PalletDetector:
 	"""Loads a YOLO model and returns structured PalletDetection objects."""
-	def __init__(self, model_path: str = "models/whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = 0.4, imgsz: int = 640):
+	def __init__(self, model_path: str = "models/whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = 0.25, imgsz: int = 640):
 		self.model = YOLO(model_path)
-		self.camera = camera or CameraParameters()
+		self.camera = camera or CameraParameters(depth_m=PROTOTYPE_DEPTH_M, horizontal_fov_deg=PROTOTYPE_FOV_DEG)
 		self.conf = conf
 		self.imgsz = imgsz
 
@@ -101,8 +101,8 @@ class BatchProcessor:
 	def get_images(self) -> list[Path]:
 		"""Returns a sorted list of image paths matching the allowed extensions (.jpg, .jpeg, .png)."""
 		return sorted(
-			p for p in Path("images").iterdir()
-			if p.is_file() and p.suffix.lower() in ALLOWED_IMG_EXT
+			p for p in Path("images").glob("*")
+			if p.suffix.lower() in ALLOWED_IMG_EXT
 		)
 
 	def process(self):
