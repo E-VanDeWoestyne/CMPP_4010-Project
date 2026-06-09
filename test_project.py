@@ -8,7 +8,8 @@ from project import (
     CameraParameters,
     PalletDetection,
     PalletDetector,
-    BatchProcessor
+    BatchProcessor,
+    CONFIDENCE
 )
 
 class TestBoundingBox(unittest.TestCase):
@@ -99,7 +100,7 @@ class TestPalletDetector(unittest.TestCase):
         detections = detector.detect(Path("dummy.jpg"))
 
         mock_yolo_instance.predict.assert_called_once_with(
-            "dummy.jpg", conf=0.25, imgsz=640, save=False
+            "dummy.jpg", conf=CONFIDENCE, imgsz=640, save=False
         )
         self.assertEqual(len(detections), 1)
         

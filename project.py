@@ -6,6 +6,7 @@ from ultralytics import YOLO
 PROTOTYPE_DEPTH_M = 5.0
 PROTOTYPE_FOV_DEG = 60.0
 ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png"}
+CONFIDENCE = 0.5
 
 @dataclass
 class BoundingBox:
@@ -69,7 +70,7 @@ class PalletDetection:
 
 class PalletDetector:
 	"""Loads a YOLO model and returns structured PalletDetection objects."""
-	def __init__(self, model_path: str = "models/whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = 0.25, imgsz: int = 640):
+	def __init__(self, model_path: str = "models/whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = CONFIDENCE, imgsz: int = 640):
 		try:
 			self.model = YOLO(model_path)
 		except Exception as e:
