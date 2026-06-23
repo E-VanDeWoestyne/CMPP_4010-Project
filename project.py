@@ -2,11 +2,13 @@ import math
 from pathlib import Path
 from dataclasses import dataclass
 from ultralytics import YOLO
+import cv2
 
 PROTOTYPE_DEPTH_M = 5.0
 PROTOTYPE_FOV_DEG = 60.0
 ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png"}
 CONFIDENCE = 0.5
+ARUCO_MARKER_SIZE_M = 0.15
 
 @dataclass
 class BoundingBox:
@@ -69,49 +71,57 @@ class PalletDetection:
 
 
 class PalletDetector:
-	"""Loads a YOLO model and returns structured PalletDetection objects."""
-	def __init__(self, model_path: str = "models/whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = CONFIDENCE, imgsz: int = 640):
-		try:
-			self.model = YOLO(model_path)
-		except Exception as e:
-			print(f"Error initializing YOLO model: {e}")
-			raise e
+    """Loads a YOLO model and returns structured PalletDetection objects."""
+    def __init__(self, model_path: str = "models/whole_pallet_s_640.pt", camera: CameraParameters = None, conf: float = CONFIDENCE, imgsz: int = 640):
+        try:
+            self.model = YOLO(model_path)
+        except Exception as e:
+            print(f"Error initializing YOLO model: {e}")
+            raise e
 
-		self.camera = camera or CameraParameters(depth_m=PROTOTYPE_DEPTH_M, horizontal_fov_deg=PROTOTYPE_FOV_DEG)
-		self.conf = conf
-		self.imgsz = imgsz
+        self.camera = camera or CameraParameters(depth_m=PROTOTYPE_DEPTH_M, horizontal_fov_deg=PROTOTYPE_FOV_DEG)
+        self.conf = conf
+        self.imgsz = imgsz
 
-	def detect(self, image_path: Path) -> list[PalletDetection]:
-		"""Runs prediction on an image and returns a list of PalletDetections."""
-		try:
-			results = self.model.predict(str(image_path), conf=self.conf, imgsz=self.imgsz, save=False)
-		except Exception as e:
-			print(f"Error during detection on {image_path}: {e}")
-			return []
+    def detect(self, image_path: Path) -> list[PalletDetection]:
+        """Runs prediction on an image and returns a list of PalletDetections."""
+        try:
+            results = self.model.predict(str(image_path), conf=self.conf, imgsz=self.imgsz, save=False, verbose=False)
+        except Exception as e:
+            print(f"Error during detection on {image_path}: {e}")
+            return []
 
-		detections = []
-		for result in results:
-			try:
-				img_width = result.orig_img.shape[1]
-				for box in result.boxes:
-					cls_id = int(box.cls[0])
-					confidence = float(box.conf[0])
-					x1, y1, x2, y2 = box.xyxy[0].tolist()
+        detections = []
+        for result in results:
+            try:
+                img_width = result.orig_img.shape[1]        
+                focal_length = self.camera.calculate_focal_length(img_width)   
+                aruco_depth = get_aruco_depth(image_path, focal_length, ARUCO_MARKER_SIZE_M)
+                
+                if aruco_depth is not None:
+                    self.camera.depth_m = aruco_depth
+                else:
+                    self.camera.depth_m = PROTOTYPE_DEPTH_M
 
-					bbox = BoundingBox(x1, y1, x2, y2)
-					detections.append(
-						PalletDetection(
-						bbox=bbox,
-						confidence=confidence,
-						class_id=cls_id,
-						img_width=img_width,
-						camera=self.camera
-					)
-					)
-			except (AttributeError, TypeError) as e:
-				print(f"Error processing detection results for {image_path}: {e}")
+                for box in result.boxes:
+                    cls_id = int(box.cls[0])
+                    confidence = float(box.conf[0])
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
 
-		return detections
+                    bbox = BoundingBox(x1, y1, x2, y2)
+                    detections.append(
+                        PalletDetection(
+                            bbox=bbox,
+                            confidence=confidence,
+                            class_id=cls_id,
+                            img_width=img_width,
+                            camera=self.camera
+                        )
+                    )
+            except (AttributeError, TypeError) as e:
+                print(f"Error processing detection results for {image_path}: {e}")
+
+        return detections
 
 
 class BatchProcessor:
@@ -143,6 +153,30 @@ class BatchProcessor:
 		except OSError as e:
 			print(f"Error during batch processing: {e}")
 			raise e
+
+def get_aruco_depth(image_path: Path, focal_length: float, marker_size_m: float) -> float:
+    """Detects a 4x4 ArUco marker and returns its depth in meters."""
+    img = cv2.imread(str(image_path))
+    if img is None:
+        return None
+    
+    # Modern OpenCV ArUco setup
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    parameters = cv2.aruco.DetectorParameters()
+    detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+    
+    corners, ids, _ = detector.detectMarkers(img)
+    
+    if ids is not None and len(ids) > 0:
+        # Calculate the pixel size of the first detected marker
+        perimeter = cv2.arcLength(corners[0][0], True)
+        marker_size_px = perimeter / 4.0
+        
+        if marker_size_px > 0:
+            # Basic depth math: Z = (Real_Size * Focal_Length) / Pixel_Size
+            return (marker_size_m * focal_length) / marker_size_px
+            
+    return None
 
 
 if __name__ == "__main__":
