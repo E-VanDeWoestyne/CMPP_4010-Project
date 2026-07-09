@@ -8,7 +8,7 @@ PROTOTYPE_DEPTH_M = 5.0
 PROTOTYPE_FOV_DEG = 60.0
 ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png"}
 CONFIDENCE = 0.5
-ARUCO_MARKER_SIZE_M = 0.15
+ARUCO_MARKER_SIZE_M = 0.1889125
 
 @dataclass
 class BoundingBox:
