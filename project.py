@@ -98,10 +98,11 @@ class PalletDetector:
                 focal_length = self.camera.calculate_focal_length(img_width)   
                 aruco_depth = get_aruco_depth(image_path, focal_length, ARUCO_MARKER_SIZE_M)
                 
-                if aruco_depth is not None:
-                    self.camera.depth_m = aruco_depth
-                else:
-                    self.camera.depth_m = PROTOTYPE_DEPTH_M
+                # Assign to a local variable instead of altering the shared global reference state
+                current_depth = aruco_depth if aruco_depth is not None else PROTOTYPE_DEPTH_M
+                
+                # Instantiate a unique camera parameters instance specifically for this detection frame
+                frame_camera = CameraParameters(depth_m=current_depth, horizontal_fov_deg=self.camera.horizontal_fov_deg)
 
                 for box in result.boxes:
                     cls_id = int(box.cls[0])
@@ -115,7 +116,7 @@ class PalletDetector:
                             confidence=confidence,
                             class_id=cls_id,
                             img_width=img_width,
-                            camera=self.camera
+                            camera=frame_camera  # Pass the safe local frame instance
                         )
                     )
             except (AttributeError, TypeError) as e:
