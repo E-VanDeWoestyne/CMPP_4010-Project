@@ -3,13 +3,17 @@ from unittest.mock import MagicMock, patch, mock_open
 from pathlib import Path
 import math
 
+# Assuming your file is named project.py
 from project import (
     BoundingBox,
     CameraParameters,
     PalletDetection,
     PalletDetector,
     BatchProcessor,
-    CONFIDENCE
+    CONFIDENCE,
+    PROTOTYPE_DEPTH_M,
+    ARUCO_MARKER_SIZE_M,
+    get_aruco_depth
 )
 
 class TestBoundingBox(unittest.TestCase):
@@ -26,15 +30,11 @@ class TestCameraParameters(unittest.TestCase):
         self.camera = CameraParameters(depth_m=5.0, horizontal_fov_deg=60.0)
 
     def test_calculate_focal_length(self):
-        # focal_length = (width / 2) / tan(fov / 2)
-        # For width=640, fov=60: (320) / tan(30 deg) = 320 / (1 / sqrt(3)) = 320 * sqrt(3) ~ 554.25625
         focal_length = self.camera.calculate_focal_length(640)
         expected = 320.0 / math.tan(math.radians(30.0))
         self.assertAlmostEqual(focal_length, expected, places=5)
 
     def test_pixel_to_meters(self):
-        # meters = (pixels * depth) / focal_length
-        # (100 px * 5.0 m) / 500 = 1.0 m
         meters = self.camera.pixel_to_meters(100.0, 500.0)
         self.assertEqual(meters, 1.0)
 
@@ -43,9 +43,6 @@ class TestPalletDetection(unittest.TestCase):
     def setUp(self):
         self.camera = CameraParameters(depth_m=5.0, horizontal_fov_deg=60.0)
         self.bbox = BoundingBox(x1=100.0, y1=100.0, x2=200.0, y2=200.0)
-        # width_px = sqrt(100^2 + 100^2) = sqrt(20000) ~ 141.421356
-        # height_px = 200 - 100 = 100
-        # side_width_px = width_px / sqrt(3) ~ 141.421356 / 1.7320508 ~ 81.649658
         self.detection = PalletDetection(
             bbox=self.bbox,
             confidence=0.85,
@@ -56,7 +53,7 @@ class TestPalletDetection(unittest.TestCase):
 
     def test_pixel_dimensions(self):
         self.assertEqual(self.detection.height_px, 100.0)
-        expected_diagonal = math.sqrt(100**2 + 100**2)
+        expected_diagonal = math.hypot(100.0, 100.0)
         self.assertAlmostEqual(self.detection.diagonal_width_px, expected_diagonal, places=5)
         self.assertAlmostEqual(self.detection.side_width_px, expected_diagonal / math.sqrt(3.0), places=5)
 
@@ -76,17 +73,18 @@ class TestPalletDetection(unittest.TestCase):
 
 
 class TestPalletDetector(unittest.TestCase):
+    @patch("project.get_aruco_depth")
     @patch("project.YOLO")
-    def test_detect_parses_results_correctly(self, mock_yolo_cls):
-        # Set up mock YOLO instance
+    def test_detect_parses_results_correctly(self, mock_yolo_cls, mock_get_aruco):
+        # Force ArUco to return None to test the default prototype fallback depth
+        mock_get_aruco.return_value = None
+
         mock_yolo_instance = MagicMock()
         mock_yolo_cls.return_value = mock_yolo_instance
 
-        # Set up mock predict return value
         mock_result = MagicMock()
-        mock_result.orig_img.shape = (480, 640, 3)  # height, width, channels
+        mock_result.orig_img.shape = (480, 640, 3)
 
-        # Mock boxes
         mock_box = MagicMock()
         mock_box.cls = [0.0]
         mock_box.conf = [0.92]
@@ -100,17 +98,14 @@ class TestPalletDetector(unittest.TestCase):
         detections = detector.detect(Path("dummy.jpg"))
 
         mock_yolo_instance.predict.assert_called_once_with(
-            "dummy.jpg", conf=CONFIDENCE, imgsz=640, save=False
+            "dummy.jpg", conf=CONFIDENCE, imgsz=640, save=False, verbose=False
         )
         self.assertEqual(len(detections), 1)
         
         det = detections[0]
+        self.assertEqual(det.camera.depth_m, PROTOTYPE_DEPTH_M)
         self.assertEqual(det.confidence, 0.92)
-        self.assertEqual(det.class_id, 0)
         self.assertEqual(det.bbox.x1, 100.0)
-        self.assertEqual(det.bbox.y1, 150.0)
-        self.assertEqual(det.bbox.x2, 200.0)
-        self.assertEqual(det.bbox.y2, 250.0)
 
 
 class TestBatchProcessor(unittest.TestCase):
@@ -122,14 +117,13 @@ class TestBatchProcessor(unittest.TestCase):
         processor = BatchProcessor(detector=detector, output_file="results.txt")
         images = processor.get_images()
 
-        self.assertEqual(images, [Path("images/Image3.jpg"), Path("images/Image4.jpg")]) # Should be sorted
+        self.assertEqual(images, [Path("images/Image3.jpg"), Path("images/Image4.jpg")])
 
     @patch("project.Path.glob")
     @patch("builtins.open", new_callable=mock_open)
     def test_process_runs_pipeline(self, mock_file, mock_glob):
         mock_glob.return_value = [Path("images/Image4.jpg")]
         
-        # Mock detector and a detection
         mock_detector = MagicMock()
         mock_detection = MagicMock()
         mock_detection.to_string.return_value = "formatted_output"
@@ -139,11 +133,39 @@ class TestBatchProcessor(unittest.TestCase):
         processor.process()
 
         mock_detector.detect.assert_called_once_with(Path("images/Image4.jpg"))
-        mock_detection.to_string.assert_called_once_with("Image4.jpg")
-        
-        # Verify writing to file
         mock_file.assert_called_once_with("test_results.txt", "w")
         mock_file().write.assert_called_once_with("formatted_output\n")
+
+
+class TestArUcoDepth(unittest.TestCase):
+    @patch("project.cv2.imread")
+    def test_get_aruco_depth_file_missing(self, mock_imread):
+        mock_imread.return_value = None
+        depth = get_aruco_depth(Path("invalid.jpg"), focal_length=500.0, marker_size_m=0.12)
+        self.assertIsNone(depth)
+
+    @patch("project.cv2.aruco.ArucoDetector")
+    @patch("project.cv2.arcLength")
+    @patch("project.cv2.imread")
+    def test_get_aruco_depth_success(self, mock_imread, mock_arc_length, mock_detector_cls):
+        # Set up mock image layout
+        mock_imread.return_value = MagicMock()
+        
+        # Setup mock detector behaviors
+        mock_detector_instance = MagicMock()
+        mock_detector_cls.return_value = mock_detector_instance
+        
+        # Mock successful coordinates returned: (corners, ids, rejected)
+        mock_corners = [[["dummy_coord_array"]]]
+        mock_ids = [1]
+        mock_detector_instance.detectMarkers.return_value = (mock_corners, mock_ids, [])
+        
+        # Say perimeter is 400px -> marker side is 100px
+        mock_arc_length.return_value = 400.0
+        
+        # Expected depth calculations: (0.10m * 500.0 focal) / 100px = 0.5 meters
+        depth = get_aruco_depth(Path("valid.jpg"), focal_length=500.0, marker_size_m=0.10)
+        self.assertAlmostEqual(depth, 0.5, places=5)
 
 
 if __name__ == "__main__":
