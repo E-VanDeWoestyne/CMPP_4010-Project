@@ -7,5 +7,7 @@ __pycache__/
 venv/
 ENV/
 
-# Local results
+# Local results and logs
 results.txt
+test_results.txt
+test_run.log
