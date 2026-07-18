@@ -143,7 +143,9 @@ class PalletDetector:
                 print(f"Skipping {image_path}: {e}")
                 continue
 
-            aruco_depth = get_aruco_depth(result.orig_img, focal_length, ARUCO_MARKER_SIZE_M)
+            aruco_depth = get_aruco_depth(
+                result.orig_img, focal_length, ARUCO_MARKER_SIZE_M
+            )
 
             # Assign to a local variable instead of altering the shared global reference state
             current_depth = (
@@ -210,7 +212,9 @@ class BatchProcessor:
             raise e
 
 
-def get_aruco_depth(img: np.ndarray, focal_length: float, marker_size_m: float) -> float:
+def get_aruco_depth(
+    img: np.ndarray, focal_length: float, marker_size_m: float
+) -> float:
     """Detects a 4x4 ArUco marker in an already-decoded image and returns its depth in meters."""
     if img is None:
         return None
