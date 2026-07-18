@@ -10,6 +10,19 @@ ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png"}
 CONFIDENCE = 0.5
 ARUCO_MARKER_SIZE_M = 0.125941666667
 
+
+class CameraGeometryError(Exception):
+	"""Base exception for camera geometry calculation failures."""
+
+
+class FocalLengthError(CameraGeometryError):
+	"""Raised when focal length cannot be calculated from the given camera parameters."""
+
+
+class PixelConversionError(CameraGeometryError):
+	"""Raised when a pixel measurement cannot be converted to real-world units."""
+
+
 @dataclass
 class BoundingBox:
 	"""Represents bounding box coordinates."""
@@ -26,37 +39,37 @@ class CameraParameters:
 		self.horizontal_fov_deg = horizontal_fov_deg
 
 	def calculate_focal_length(self, img_width: int) -> float:
-		"""Calculates focal length in pixels using the horizontal FOV."""
 		try:
 			return (img_width / 2.0) / math.tan(math.radians(self.horizontal_fov_deg) / 2.0)
 		except ZeroDivisionError as e:
-			print(f"Error calculating focal length: {e}")
-			return None
+			raise FocalLengthError(
+				f"Cannot calculate focal length for horizontal_fov_deg={self.horizontal_fov_deg}: {e}"
+			) from e
 
 	def pixel_to_meters(self, pixels: float, focal_length: float) -> float:
-		"""Converts pixel measurements to real-world meters at the assumed depth."""
 		try:
 			return (pixels * self.depth_m) / focal_length
 		except ZeroDivisionError as e:
-			print(f"Error converting pixels to meters: {e}")
-			return None
+			raise PixelConversionError(
+				f"Cannot convert pixels to meters with focal_length={focal_length}: {e}"
+			) from e
 
 
 class PalletDetection:
 	"""Represents a single detected pallet and calculates its geometry."""
-	def __init__(self, bbox: BoundingBox, confidence: float, class_id: int, img_width: int, camera: CameraParameters):
+	def __init__(self, bbox: BoundingBox, confidence: float, class_id: int, focal_length: float, camera: CameraParameters):
 		self.bbox = bbox
 		self.confidence = confidence
 		self.class_id = class_id
 		self.camera = camera
+		self.focal_length = focal_length
 
 		# Calculate pixel dimensions
 		self.height_px = bbox.y2 - bbox.y1
-		self.diagonal_width_px = math.hypot(bbox.x2 - bbox.x1, bbox.y2 - bbox.y1) # AI simplified version of sqrt((x2-x1)^2 + (y2-y1)^2)
+		self.diagonal_width_px = math.hypot(bbox.x2 - bbox.x1, bbox.y2 - bbox.y1)
 		self.side_width_px = self.diagonal_width_px / math.sqrt(3)
 
-		# Estimate focal length and real-world dimensions
-		self.focal_length = camera.calculate_focal_length(img_width)
+		# Convert to real-world dimensions using the frame's precomputed focal length
 		self.side_width_m = camera.pixel_to_meters(self.side_width_px, self.focal_length)
 		self.height_m = camera.pixel_to_meters(self.height_px, self.focal_length)
 
@@ -93,17 +106,23 @@ class PalletDetector:
 
         detections = []
         for result in results:
-            try:
-                img_width = result.orig_img.shape[1]        
-                focal_length = self.camera.calculate_focal_length(img_width)   
-                aruco_depth = get_aruco_depth(image_path, focal_length, ARUCO_MARKER_SIZE_M)
-                
-                # Assign to a local variable instead of altering the shared global reference state
-                current_depth = aruco_depth if aruco_depth is not None else PROTOTYPE_DEPTH_M
-                
-                # Instantiate a unique camera parameters instance specifically for this detection frame
-                frame_camera = CameraParameters(depth_m=current_depth, horizontal_fov_deg=self.camera.horizontal_fov_deg)
+            img_width = result.orig_img.shape[1]
 
+            try:
+                focal_length = self.camera.calculate_focal_length(img_width)
+            except FocalLengthError as e:
+                print(f"Skipping {image_path}: {e}")
+                continue
+
+            aruco_depth = get_aruco_depth(image_path, focal_length, ARUCO_MARKER_SIZE_M)
+
+            # Assign to a local variable instead of altering the shared global reference state
+            current_depth = aruco_depth if aruco_depth is not None else PROTOTYPE_DEPTH_M
+
+            # Instantiate a unique camera parameters instance specifically for this detection frame
+            frame_camera = CameraParameters(depth_m=current_depth, horizontal_fov_deg=self.camera.horizontal_fov_deg)
+
+            try:
                 for box in result.boxes:
                     cls_id = int(box.cls[0])
                     confidence = float(box.conf[0])
@@ -115,12 +134,14 @@ class PalletDetector:
                             bbox=bbox,
                             confidence=confidence,
                             class_id=cls_id,
-                            img_width=img_width,
+                            focal_length=focal_length,  # Reused across all boxes in this frame
                             camera=frame_camera  # Pass the safe local frame instance
                         )
                     )
             except (AttributeError, TypeError) as e:
                 print(f"Error processing detection results for {image_path}: {e}")
+            except PixelConversionError as e:
+                print(f"Error converting geometry for {image_path}: {e}")
 
         return detections
 
