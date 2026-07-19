@@ -1,1 +1,0 @@
-Image4.jpg: Pallet detected: conf=0.66, bbox=(542,481,933,783), diagonal=494.3px, side_width=285.4px, height=302.5px | Real-world (at 5.0m): side_width=1.064m, height=1.128m
