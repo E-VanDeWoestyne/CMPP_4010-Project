@@ -4,11 +4,12 @@ from dataclasses import dataclass
 import numpy as np
 from ultralytics import YOLO
 import cv2
+from PIL import Image, ImageOps
 
 PROTOTYPE_DEPTH_M = 5.0
 PROTOTYPE_FOV_DEG = 60.0
 ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png"}
-CONFIDENCE = 0.5
+CONFIDENCE = 0.15
 ARUCO_MARKER_SIZE_M = 0.1889125
 
 
@@ -123,10 +124,15 @@ class PalletDetector:
     def detect(self, image_path: Path) -> list[PalletDetection]:
         """Runs prediction on an image and returns a list of PalletDetections."""
         try:
+            pil_img = Image.open(image_path)
+            pil_img = ImageOps.exif_transpose(pil_img)
+
             results = self.model.predict(
-                str(image_path),
+                pil_img,
                 conf=self.conf,
+                iou=0.45,
                 imgsz=self.imgsz,
+                rect=True,
                 save=False,
                 verbose=False,
             )
@@ -228,9 +234,11 @@ def get_aruco_depth(
     corners, ids, _ = detector.detectMarkers(img)
 
     if ids is not None and len(ids) > 0:
+        pts = corners[0][0]
         # Calculate the pixel size of the first detected marker
-        perimeter = cv2.arcLength(corners[0][0], True)
-        marker_size_px = perimeter / 4.0
+        marker_size_px = float(
+            np.mean(np.linalg.norm(pts - np.roll(pts, -1, axis=0), axis=1))
+        )
 
         if marker_size_px > 0:
             # Basic depth math: Z = (Real_Size * Focal_Length) / Pixel_Size
