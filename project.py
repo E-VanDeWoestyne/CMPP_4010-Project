@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Optional
 import numpy as np
 from ultralytics import YOLO
 import cv2
@@ -9,8 +10,24 @@ from PIL import Image, ImageOps
 PROTOTYPE_DEPTH_M = 5.0
 PROTOTYPE_FOV_DEG = 60.0
 ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png"}
-CONFIDENCE = 0.15
+CONFIDENCE = 0.50
 ARUCO_MARKER_SIZE_M = 0.1889125
+
+# Names match the training skeleton exactly, in the same order used for kpt_shape/flip_idx.
+KEYPOINT_NAMES = (
+    "front_top_left",
+    "front_top_right",
+    "front_bottom_right",
+    "front_bottom_left",
+    "back_top_right",
+    "back_bottom_right",
+    "back_top_left",
+    "back_bottom_left",
+)
+
+# Below this, a keypoint is treated as "not really there" rather than a real detection.
+# Worth tuning empirically once you have more real-world predictions to look at.
+KEYPOINT_VISIBILITY_THRESHOLD = 0.3
 
 
 class CameraGeometryError(Exception):
@@ -33,6 +50,94 @@ class BoundingBox:
     y1: float
     x2: float
     y2: float
+
+
+@dataclass
+class Keypoint:
+    """A single detected keypoint in pixel space, with the model's confidence in it."""
+
+    x: float
+    y: float
+    confidence: float
+
+    @property
+    def is_visible(self) -> bool:
+        return self.confidence >= KEYPOINT_VISIBILITY_THRESHOLD
+
+    def distance_to(self, other: "Keypoint") -> float:
+        return math.hypot(self.x - other.x, self.y - other.y)
+
+
+@dataclass
+class PalletKeypoints:
+    """The 8 named corner keypoints for one detected pallet, matching the training skeleton."""
+
+    front_top_left: Keypoint
+    front_top_right: Keypoint
+    front_bottom_right: Keypoint
+    front_bottom_left: Keypoint
+    back_top_right: Keypoint
+    back_bottom_right: Keypoint
+    back_top_left: Keypoint
+    back_bottom_left: Keypoint
+
+    @classmethod
+    def from_yolo(cls, xy: np.ndarray, conf: np.ndarray) -> "PalletKeypoints":
+        """Builds from one instance's Ultralytics keypoint arrays: xy shape (8, 2), conf shape (8,)."""
+        points = [
+            Keypoint(x=float(x), y=float(y), confidence=float(c))
+            for (x, y), c in zip(xy, conf)
+        ]
+        if len(points) != len(KEYPOINT_NAMES):
+            raise ValueError(
+                f"Expected {len(KEYPOINT_NAMES)} keypoints, got {len(points)}"
+            )
+        return cls(*points)
+
+
+@dataclass
+class PixelGeometry:
+    """Pure pixel-space measurements derived from a pallet's detected keypoints."""
+
+    front_width_px: float
+    height_px: float
+    side_depth_px: Optional[float]
+    visible_side: Optional[str]  # "right", "left", or None if neither side is visible
+
+
+def compute_pixel_geometry(kp: PalletKeypoints) -> PixelGeometry:
+    """Computes a pallet's real pixel-space geometry from its 8 detected keypoints.
+
+    front_width_px: distance across the front face's top edge.
+    height_px: average of the two front vertical edges (more robust to a single noisy point).
+    side_depth_px: distance from the front face back into whichever side is actually
+        visible, using its back-top corner. None if neither side's keypoints are
+        confidently detected.
+
+    Pure function of `kp` alone, so it's unit-testable without a camera or a YOLO model.
+    """
+    front_width_px = kp.front_top_left.distance_to(kp.front_top_right)
+    height_px = (
+        kp.front_top_left.distance_to(kp.front_bottom_left)
+        + kp.front_top_right.distance_to(kp.front_bottom_right)
+    ) / 2.0
+
+    side_depth_px: Optional[float] = None
+    visible_side: Optional[str] = None
+
+    if kp.back_top_right.is_visible and kp.back_bottom_right.is_visible:
+        side_depth_px = kp.front_top_right.distance_to(kp.back_top_right)
+        visible_side = "right"
+    elif kp.back_top_left.is_visible and kp.back_bottom_left.is_visible:
+        side_depth_px = kp.front_top_left.distance_to(kp.back_top_left)
+        visible_side = "left"
+
+    return PixelGeometry(
+        front_width_px=front_width_px,
+        height_px=height_px,
+        side_depth_px=side_depth_px,
+        visible_side=visible_side,
+    )
 
 
 class CameraParameters:
@@ -62,49 +167,62 @@ class CameraParameters:
 
 
 class PalletDetection:
-    """Represents a single detected pallet and calculates its geometry."""
+    """Represents a single detected pallet and its real-world geometry, derived from keypoints."""
 
     def __init__(
         self,
         bbox: BoundingBox,
+        keypoints: PalletKeypoints,
         confidence: float,
         class_id: int,
         focal_length: float,
         camera: CameraParameters,
     ):
         self.bbox = bbox
+        self.keypoints = keypoints
         self.confidence = confidence
         self.class_id = class_id
         self.camera = camera
         self.focal_length = focal_length
 
-        # Calculate pixel dimensions
-        self.height_px = bbox.y2 - bbox.y1
-        self.diagonal_width_px = math.hypot(bbox.x2 - bbox.x1, bbox.y2 - bbox.y1)
-        self.side_width_px = self.diagonal_width_px / math.sqrt(3)
+        geometry = compute_pixel_geometry(keypoints)
+        self.front_width_px = geometry.front_width_px
+        self.height_px = geometry.height_px
+        self.side_depth_px = geometry.side_depth_px
+        self.visible_side = geometry.visible_side
 
         # Convert to real-world dimensions using the frame's precomputed focal length
-        self.side_width_m = camera.pixel_to_meters(
-            self.side_width_px, self.focal_length
+        self.front_width_m = camera.pixel_to_meters(
+            self.front_width_px, self.focal_length
         )
         self.height_m = camera.pixel_to_meters(self.height_px, self.focal_length)
+        self.side_depth_m = (
+            camera.pixel_to_meters(self.side_depth_px, self.focal_length)
+            if self.side_depth_px is not None
+            else None
+        )
 
     def to_string(self, image_name: str) -> str:
         """Formats the detection into a standard result string."""
+        side_info = (
+            f"side_depth={self.side_depth_m:.3f}m ({self.visible_side} side visible)"
+            if self.side_depth_m is not None
+            else "side not visible"
+        )
         return (
             f"{image_name}: Pallet detected: conf={self.confidence:.2f}, "
-            f"bbox=({self.bbox.x1:.0f},{self.bbox.y1:.0f},{self.bbox.x2:.0f},{self.bbox.y2:.0f}), "
-            f"diagonal={self.diagonal_width_px:.1f}px, side_width={self.side_width_px:.1f}px, height={self.height_px:.1f}px | "
-            f"Real-world (at {self.camera.depth_m}m): side_width={self.side_width_m:.3f}m, height={self.height_m:.3f}m"
+            f"bbox=({self.bbox.x1:.0f},{self.bbox.y1:.0f},{self.bbox.x2:.0f},{self.bbox.y2:.0f}) | "
+            f"Real-world (at {self.camera.depth_m}m): "
+            f"front_width={self.front_width_m:.3f}m, height={self.height_m:.3f}m, {side_info}"
         )
 
 
 class PalletDetector:
-    """Loads a YOLO model and returns structured PalletDetection objects."""
+    """Loads a YOLO pose model and returns structured PalletDetection objects."""
 
     def __init__(
         self,
-        model_path: str = "models/whole_pallet_s_640.pt",
+        model_path: str = "models/pallet_pose_best.pt",
         camera: CameraParameters = None,
         conf: float = CONFIDENCE,
         imgsz: int = 640,
@@ -164,23 +282,35 @@ class PalletDetector:
                 depth_m=current_depth, horizontal_fov_deg=self.camera.horizontal_fov_deg
             )
 
+            if result.keypoints is None:
+                print(f"No keypoints returned for {image_path} — is model_path a pose model?")
+                continue
+
+            keypoints_xy = result.keypoints.xy.cpu().numpy()
+            keypoints_conf = result.keypoints.conf.cpu().numpy()
+
             try:
-                for box in result.boxes:
+                for i, box in enumerate(result.boxes):
                     cls_id = int(box.cls[0])
                     confidence = float(box.conf[0])
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
 
                     bbox = BoundingBox(x1, y1, x2, y2)
+                    keypoints = PalletKeypoints.from_yolo(
+                        keypoints_xy[i], keypoints_conf[i]
+                    )
+
                     detections.append(
                         PalletDetection(
                             bbox=bbox,
+                            keypoints=keypoints,
                             confidence=confidence,
                             class_id=cls_id,
                             focal_length=focal_length,  # Reused across all boxes in this frame
                             camera=frame_camera,  # Pass the safe local frame instance
                         )
                     )
-            except (AttributeError, TypeError) as e:
+            except (AttributeError, TypeError, IndexError, ValueError) as e:
                 print(f"Error processing detection results for {image_path}: {e}")
             except PixelConversionError as e:
                 print(f"Error converting geometry for {image_path}: {e}")
