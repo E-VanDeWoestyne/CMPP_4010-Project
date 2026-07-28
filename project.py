@@ -8,10 +8,11 @@ import cv2
 from PIL import Image, ImageOps
 
 PROTOTYPE_DEPTH_M = 5.0
-PROTOTYPE_FOV_DEG = 60.0
+PROTOTYPE_FOV_DEG = 85.0
 ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png"}
 CONFIDENCE = 0.50
-ARUCO_MARKER_SIZE_M = 0.1889125
+ARUCO_MARKER_SIZE_IN = 7 + (7 / 16)
+ARUCO_MARKER_SIZE_M = ARUCO_MARKER_SIZE_IN * 0.0254
 
 # Names match the training skeleton exactly, in the same order used for kpt_shape/flip_idx.
 KEYPOINT_NAMES = (
@@ -105,6 +106,19 @@ class PixelGeometry:
     visible_side: Optional[str]  # "right", "left", or None if neither side is visible
 
 
+def _pair_length(first: Keypoint, second: Keypoint) -> Optional[float]:
+    if first.is_visible and second.is_visible:
+        return first.distance_to(second)
+    return None
+
+
+def _average_length(candidates: list[Optional[float]]) -> Optional[float]:
+    lengths = [candidate for candidate in candidates if candidate is not None]
+    if not lengths:
+        return None
+    return sum(lengths) / len(lengths)
+
+
 def compute_pixel_geometry(kp: PalletKeypoints) -> PixelGeometry:
     """Computes a pallet's real pixel-space geometry from its 8 detected keypoints.
 
@@ -116,21 +130,61 @@ def compute_pixel_geometry(kp: PalletKeypoints) -> PixelGeometry:
 
     Pure function of `kp` alone, so it's unit-testable without a camera or a YOLO model.
     """
-    front_width_px = kp.front_top_left.distance_to(kp.front_top_right)
-    height_px = (
-        kp.front_top_left.distance_to(kp.front_bottom_left)
-        + kp.front_top_right.distance_to(kp.front_bottom_right)
-    ) / 2.0
+    front_width_px = _average_length(
+        [
+            _pair_length(kp.front_top_left, kp.front_top_right),
+            _pair_length(kp.front_bottom_left, kp.front_bottom_right),
+            _pair_length(kp.back_top_left, kp.back_top_right),
+            _pair_length(kp.back_bottom_left, kp.back_bottom_right),
+        ]
+    )
+    height_px = _average_length(
+        [
+            _pair_length(kp.front_top_left, kp.front_bottom_left),
+            _pair_length(kp.front_top_right, kp.front_bottom_right),
+            _pair_length(kp.back_top_left, kp.back_bottom_left),
+            _pair_length(kp.back_top_right, kp.back_bottom_right),
+        ]
+    )
+
+    right_side_depth_px = _average_length(
+        [
+            _pair_length(kp.front_top_right, kp.back_top_right),
+            _pair_length(kp.front_bottom_right, kp.back_bottom_right),
+        ]
+    )
+    left_side_depth_px = _average_length(
+        [
+            _pair_length(kp.front_top_left, kp.back_top_left),
+            _pair_length(kp.front_bottom_left, kp.back_bottom_left),
+        ]
+    )
 
     side_depth_px: Optional[float] = None
     visible_side: Optional[str] = None
 
-    if kp.back_top_right.is_visible and kp.back_bottom_right.is_visible:
-        side_depth_px = kp.front_top_right.distance_to(kp.back_top_right)
-        visible_side = "right"
-    elif kp.back_top_left.is_visible and kp.back_bottom_left.is_visible:
-        side_depth_px = kp.front_top_left.distance_to(kp.back_top_left)
-        visible_side = "left"
+    if right_side_depth_px is not None or left_side_depth_px is not None:
+        right_count = sum(
+            candidate is not None
+            for candidate in (
+                _pair_length(kp.front_top_right, kp.back_top_right),
+                _pair_length(kp.front_bottom_right, kp.back_bottom_right),
+            )
+        )
+        left_count = sum(
+            candidate is not None
+            for candidate in (
+                _pair_length(kp.front_top_left, kp.back_top_left),
+                _pair_length(kp.front_bottom_left, kp.back_bottom_left),
+            )
+        )
+
+        if right_count >= left_count:
+            side_depth_px = right_side_depth_px
+            visible_side = "right"
+        else:
+            side_depth_px = left_side_depth_px
+            visible_side = "left"
 
     return PixelGeometry(
         front_width_px=front_width_px,
@@ -143,9 +197,15 @@ def compute_pixel_geometry(kp: PalletKeypoints) -> PixelGeometry:
 class CameraParameters:
     """Encapsulates camera properties and physical geometry calculations."""
 
-    def __init__(self, depth_m: float, horizontal_fov_deg: float):
+    def __init__(
+        self,
+        depth_m: float,
+        horizontal_fov_deg: float,
+        rear_plane_offset_m: float = 0.0,
+    ):
         self.depth_m = depth_m
         self.horizontal_fov_deg = horizontal_fov_deg
+        self.rear_plane_offset_m = rear_plane_offset_m
 
     def calculate_focal_length(self, img_width: int) -> float:
         try:
@@ -157,9 +217,12 @@ class CameraParameters:
                 f"Cannot calculate focal length for horizontal_fov_deg={self.horizontal_fov_deg}: {e}"
             ) from e
 
-    def pixel_to_meters(self, pixels: float, focal_length: float) -> float:
+    def pixel_to_meters(
+        self, pixels: float, focal_length: float, depth_m: Optional[float] = None
+    ) -> float:
         try:
-            return (pixels * self.depth_m) / focal_length
+            effective_depth_m = self.depth_m if depth_m is None else depth_m
+            return (pixels * effective_depth_m) / focal_length
         except ZeroDivisionError as e:
             raise PixelConversionError(
                 f"Cannot convert pixels to meters with focal_length={focal_length}: {e}"
@@ -192,18 +255,39 @@ class PalletDetection:
         self.visible_side = geometry.visible_side
 
         # Convert to real-world dimensions using the frame's precomputed focal length
-        self.front_width_m = camera.pixel_to_meters(
-            self.front_width_px, self.focal_length
+        self.front_width_m = (
+            camera.pixel_to_meters(self.front_width_px, self.focal_length)
+            if self.front_width_px is not None
+            else None
         )
-        self.height_m = camera.pixel_to_meters(self.height_px, self.focal_length)
+        self.height_m = (
+            camera.pixel_to_meters(self.height_px, self.focal_length)
+            if self.height_px is not None
+            else None
+        )
         self.side_depth_m = (
-            camera.pixel_to_meters(self.side_depth_px, self.focal_length)
+            camera.pixel_to_meters(
+                self.side_depth_px,
+                self.focal_length,
+                depth_m=camera.depth_m + camera.rear_plane_offset_m,
+            )
             if self.side_depth_px is not None
             else None
         )
+        self.rear_plane_offset_m = camera.rear_plane_offset_m
 
     def to_string(self, image_name: str) -> str:
         """Formats the detection into a standard result string."""
+        front_width_info = (
+            f"front_width={self.front_width_m:.3f}m"
+            if self.front_width_m is not None
+            else "front_width=unknown"
+        )
+        height_info = (
+            f"height={self.height_m:.3f}m"
+            if self.height_m is not None
+            else "height=unknown"
+        )
         side_info = (
             f"side_depth={self.side_depth_m:.3f}m ({self.visible_side} side visible)"
             if self.side_depth_m is not None
@@ -213,7 +297,7 @@ class PalletDetection:
             f"{image_name}: Pallet detected: conf={self.confidence:.2f}, "
             f"bbox=({self.bbox.x1:.0f},{self.bbox.y1:.0f},{self.bbox.x2:.0f},{self.bbox.y2:.0f}) | "
             f"Real-world (at {self.camera.depth_m}m): "
-            f"front_width={self.front_width_m:.3f}m, height={self.height_m:.3f}m, {side_info}"
+            f"{front_width_info}, {height_info}, {side_info}"
         )
 
 
@@ -239,7 +323,9 @@ class PalletDetector:
         self.conf = conf
         self.imgsz = imgsz
 
-    def detect(self, image_path: Path) -> list[PalletDetection]:
+    def detect(
+        self, image_path: Path, annotation_dir: Optional[Path] = None
+    ) -> list[PalletDetection]:
         """Runs prediction on an image and returns a list of PalletDetections."""
         try:
             pil_img = Image.open(image_path)
@@ -262,6 +348,11 @@ class PalletDetector:
         for result in results:
             img_width = result.orig_img.shape[1]
 
+            if annotation_dir is not None:
+                annotated_image = result.plot()
+                annotation_path = annotation_dir / f"{image_path.stem}_annotated{image_path.suffix.lower()}"
+                cv2.imwrite(str(annotation_path), annotated_image)
+
             try:
                 focal_length = self.camera.calculate_focal_length(img_width)
             except FocalLengthError as e:
@@ -279,7 +370,9 @@ class PalletDetector:
 
             # Instantiate a unique camera parameters instance specifically for this detection frame
             frame_camera = CameraParameters(
-                depth_m=current_depth, horizontal_fov_deg=self.camera.horizontal_fov_deg
+                depth_m=current_depth,
+                horizontal_fov_deg=self.camera.horizontal_fov_deg,
+                rear_plane_offset_m=self.camera.rear_plane_offset_m,
             )
 
             if result.keypoints is None:
@@ -321,9 +414,15 @@ class PalletDetector:
 class BatchProcessor:
     """Manages the process of running detections over multiple files and saving results."""
 
-    def __init__(self, detector: PalletDetector, output_file: str = "results.txt"):
+    def __init__(
+        self,
+        detector: PalletDetector,
+        output_file: str = "results.txt",
+        annotation_dir: str = "annotated_images",
+    ):
         self.detector = detector
         self.output_file = output_file
+        self.annotation_dir = Path(annotation_dir)
 
     def get_images(self) -> list[Path]:
         """Returns a sorted list of image paths matching the allowed extensions (.jpg, .jpeg, .png)."""
@@ -334,11 +433,14 @@ class BatchProcessor:
     def process(self):
         """Processes images, prints results, and saves them to the output file."""
         image_paths = self.get_images()
+        self.annotation_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             with open(self.output_file, "w") as f:
                 for image_path in image_paths:
-                    detections = self.detector.detect(image_path)
+                    detections = self.detector.detect(
+                        image_path, annotation_dir=self.annotation_dir
+                    )
                     for detection in detections:
                         output_line = detection.to_string(image_path.name)
                         print(output_line)
@@ -381,7 +483,8 @@ if __name__ == "__main__":
     # Configure camera parameters
     # In the future, these would be set based on actual camera specs and deployment conditions
     camera = CameraParameters(
-        depth_m=PROTOTYPE_DEPTH_M, horizontal_fov_deg=PROTOTYPE_FOV_DEG
+        depth_m=PROTOTYPE_DEPTH_M,
+        horizontal_fov_deg=PROTOTYPE_FOV_DEG,
     )
 
     # Initialize services
