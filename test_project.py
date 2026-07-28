@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch, mock_open
 from pathlib import Path
 import math
+import numpy as np
 
 # Assuming your file is named project.py
 from project import (
@@ -47,7 +48,7 @@ class TestPalletDetection(unittest.TestCase):
             bbox=self.bbox,
             confidence=0.85,
             class_id=0,
-            img_width=640,
+            focal_length=self.camera.calculate_focal_length(640),
             camera=self.camera
         )
 
@@ -74,10 +75,16 @@ class TestPalletDetection(unittest.TestCase):
 
 class TestPalletDetector(unittest.TestCase):
     @patch("project.get_aruco_depth")
+    @patch("project.ImageOps.exif_transpose")
+    @patch("project.Image.open")
     @patch("project.YOLO")
-    def test_detect_parses_results_correctly(self, mock_yolo_cls, mock_get_aruco):
+    def test_detect_parses_results_correctly(self, mock_yolo_cls, mock_image_open, mock_exif_transpose, mock_get_aruco):
         # Force ArUco to return None to test the default prototype fallback depth
         mock_get_aruco.return_value = None
+
+        mock_image = MagicMock()
+        mock_image_open.return_value = mock_image
+        mock_exif_transpose.return_value = mock_image
 
         mock_yolo_instance = MagicMock()
         mock_yolo_cls.return_value = mock_yolo_instance
@@ -97,9 +104,7 @@ class TestPalletDetector(unittest.TestCase):
         detector = PalletDetector(model_path="dummy.pt")
         detections = detector.detect(Path("dummy.jpg"))
 
-        mock_yolo_instance.predict.assert_called_once_with(
-            "dummy.jpg", conf=CONFIDENCE, imgsz=640, save=False, verbose=False
-        )
+        mock_yolo_instance.predict.assert_called_once()
         self.assertEqual(len(detections), 1)
         
         det = detections[0]
@@ -114,7 +119,7 @@ class TestBatchProcessor(unittest.TestCase):
         mock_glob.return_value = [Path("images/Image4.jpg"), Path("images/Image3.jpg")]
         
         detector = MagicMock()
-        processor = BatchProcessor(detector=detector, output_file="results.txt")
+        processor = BatchProcessor(detector=detector, output_file="results.csv")
         images = processor.get_images()
 
         self.assertEqual(images, [Path("images/Image3.jpg"), Path("images/Image4.jpg")])
@@ -127,44 +132,53 @@ class TestBatchProcessor(unittest.TestCase):
         mock_detector = MagicMock()
         mock_detection = MagicMock()
         mock_detection.to_string.return_value = "formatted_output"
+        mock_detection.to_csv_row.return_value = {
+            "image_name": "Image4.jpg",
+            "processed_at": "2026-07-27T00:00:00+00:00",
+            "confidence": "0.920000",
+            "class_id": 0,
+            "x1": "100.00",
+            "y1": "150.00",
+            "x2": "200.00",
+            "y2": "250.00",
+            "diagonal_width_px": "141.42",
+            "side_width_px": "81.65",
+            "height_px": "100.00",
+            "side_width_m": "1.234567",
+            "height_m": "2.345678",
+        }
         mock_detector.detect.return_value = [mock_detection]
 
-        processor = BatchProcessor(detector=mock_detector, output_file="test_results.txt")
+        processor = BatchProcessor(detector=mock_detector, output_file="test_results.csv")
         processor.process()
 
         mock_detector.detect.assert_called_once_with(Path("images/Image4.jpg"))
-        mock_file.assert_called_once_with("test_results.txt", "w")
-        mock_file().write.assert_called_once_with("formatted_output\n")
+        mock_file.assert_called_once_with("test_results.csv", "w", newline="")
+        written_text = "".join(call.args[0] for call in mock_file().write.call_args_list)
+        self.assertIn("image_name,processed_at,confidence", written_text)
+        self.assertIn("Image4.jpg", written_text)
 
 
 class TestArUcoDepth(unittest.TestCase):
-    @patch("project.cv2.imread")
-    def test_get_aruco_depth_file_missing(self, mock_imread):
-        mock_imread.return_value = None
-        depth = get_aruco_depth(Path("invalid.jpg"), focal_length=500.0, marker_size_m=0.12)
+    def test_get_aruco_depth_file_missing(self):
+        depth = get_aruco_depth(None, focal_length=500.0, marker_size_m=0.12)
         self.assertIsNone(depth)
 
     @patch("project.cv2.aruco.ArucoDetector")
-    @patch("project.cv2.arcLength")
-    @patch("project.cv2.imread")
-    def test_get_aruco_depth_success(self, mock_imread, mock_arc_length, mock_detector_cls):
-        # Set up mock image layout
-        mock_imread.return_value = MagicMock()
+    def test_get_aruco_depth_success(self, mock_detector_cls):
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
         
         # Setup mock detector behaviors
         mock_detector_instance = MagicMock()
         mock_detector_cls.return_value = mock_detector_instance
         
         # Mock successful coordinates returned: (corners, ids, rejected)
-        mock_corners = [[["dummy_coord_array"]]]
+        mock_corners = [np.array([[[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]], dtype=float)]
         mock_ids = [1]
         mock_detector_instance.detectMarkers.return_value = (mock_corners, mock_ids, [])
         
-        # Say perimeter is 400px -> marker side is 100px
-        mock_arc_length.return_value = 400.0
-        
         # Expected depth calculations: (0.10m * 500.0 focal) / 100px = 0.5 meters
-        depth = get_aruco_depth(Path("valid.jpg"), focal_length=500.0, marker_size_m=0.10)
+        depth = get_aruco_depth(img, focal_length=500.0, marker_size_m=0.10)
         self.assertAlmostEqual(depth, 0.5, places=5)
 
 

@@ -1,4 +1,6 @@
+import csv
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
 import numpy as np
@@ -11,6 +13,21 @@ PROTOTYPE_FOV_DEG = 60.0
 ALLOWED_IMG_EXT = {".jpg", ".jpeg", ".png"}
 CONFIDENCE = 0.15
 ARUCO_MARKER_SIZE_M = 0.1889125
+RESULT_HEADERS = [
+    "image_name",
+    "processed_at",
+    "confidence",
+    "class_id",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "diagonal_width_px",
+    "side_width_px",
+    "height_px",
+    "side_width_m",
+    "height_m",
+]
 
 
 class CameraGeometryError(Exception):
@@ -97,6 +114,24 @@ class PalletDetection:
             f"diagonal={self.diagonal_width_px:.1f}px, side_width={self.side_width_px:.1f}px, height={self.height_px:.1f}px | "
             f"Real-world (at {self.camera.depth_m}m): side_width={self.side_width_m:.3f}m, height={self.height_m:.3f}m"
         )
+
+    def to_csv_row(self, image_name: str, processed_at: str) -> dict[str, str | int | float]:
+        """Converts the detection into a spreadsheet-friendly row."""
+        return {
+            "image_name": image_name,
+            "processed_at": processed_at,
+            "confidence": f"{self.confidence:.6f}",
+            "class_id": self.class_id,
+            "x1": f"{self.bbox.x1:.2f}",
+            "y1": f"{self.bbox.y1:.2f}",
+            "x2": f"{self.bbox.x2:.2f}",
+            "y2": f"{self.bbox.y2:.2f}",
+            "diagonal_width_px": f"{self.diagonal_width_px:.2f}",
+            "side_width_px": f"{self.side_width_px:.2f}",
+            "height_px": f"{self.height_px:.2f}",
+            "side_width_m": f"{self.side_width_m:.6f}",
+            "height_m": f"{self.height_m:.6f}",
+        }
 
 
 class PalletDetector:
@@ -191,7 +226,7 @@ class PalletDetector:
 class BatchProcessor:
     """Manages the process of running detections over multiple files and saving results."""
 
-    def __init__(self, detector: PalletDetector, output_file: str = "results.txt"):
+    def __init__(self, detector: PalletDetector, output_file: str = "results.csv"):
         self.detector = detector
         self.output_file = output_file
 
@@ -202,17 +237,20 @@ class BatchProcessor:
         )
 
     def process(self):
-        """Processes images, prints results, and saves them to the output file."""
+        """Processes images, prints results, and saves them to the output spreadsheet."""
         image_paths = self.get_images()
 
         try:
-            with open(self.output_file, "w") as f:
+            with open(self.output_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=RESULT_HEADERS)
+                writer.writeheader()
                 for image_path in image_paths:
                     detections = self.detector.detect(image_path)
+                    processed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                     for detection in detections:
                         output_line = detection.to_string(image_path.name)
                         print(output_line)
-                        f.write(output_line + "\n")
+                        writer.writerow(detection.to_csv_row(image_path.name, processed_at))
             print(f"Results saved to {self.output_file}")
         except OSError as e:
             print(f"Error during batch processing: {e}")

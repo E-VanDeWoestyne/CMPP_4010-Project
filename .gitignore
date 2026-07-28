@@ -8,6 +8,7 @@ venv/
 ENV/
 
 # Local results and logs
+results.csv
 results.txt
 test_results.txt
 test_run.log

@@ -2,7 +2,7 @@
 
 # Configuration variables
 SRC_SCRIPT="project.py"
-DATA_OUT="results.txt"
+DATA_OUT="results.csv"
 
 echo "=== Initiating Core Batch Processing Pipeline ==="
 
@@ -22,17 +22,10 @@ fi
 echo "--------------------------------------------------"
 echo "Analyzing Processing Output Data Metrics:"
 
-# Use sed to isolate the raw pixel coordinates from the logs
+# Use csv-aware field extraction for the spreadsheet output
 echo "🔍 Sample of Extracted Detections (Raw Box Coordinates):"
-sed -n 's/.*bbox=\([^)]*\).*/\1/p' "$DATA_OUT" | head -n 3
+awk -F',' 'NR > 1 { printf "%s,%s,%s,%s\n", $5, $6, $7, $8; if (++count == 3) exit }' "$DATA_OUT"
 
 # Use awk, pipes, and filters to dynamically parse data telemetry and calculate analytics
 echo ""
-awk -F'conf=' '{print $2}' "$DATA_OUT" | awk -F',' '{print $1}' | awk '
-    { sum += $1; count++ } 
-    END { 
-        if (count > 0) 
-            printf "Average Object Confidence: %.2f%% (Total Detections: %d)\n", (sum/count)*100, count; 
-        else 
-            print "No active metrics logged."; 
-    }'
+awk -F',' 'NR > 1 { sum += $3; count++ } END { if (count > 0) printf "Average Object Confidence: %.2f%% (Total Detections: %d)\n", (sum/count)*100, count; else print "No active metrics logged."; }' "$DATA_OUT"
