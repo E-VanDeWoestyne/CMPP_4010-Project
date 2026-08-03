@@ -1,12 +1,15 @@
 import csv
 import math
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from dataclasses import dataclass
+
+import cv2
 import numpy as np
 from ultralytics import YOLO
-import cv2
-from PIL import Image, ImageOps
 
 PROTOTYPE_DEPTH_M = 5.0
 PROTOTYPE_FOV_DEG = 60.0
@@ -29,17 +32,21 @@ RESULT_HEADERS = [
     "height_m",
 ]
 
+ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+ARUCO_PARAMS = cv2.aruco.DetectorParameters()
+ARUCO_DETECTOR = cv2.aruco.ArucoDetector(ARUCO_DICT, ARUCO_PARAMS)
+
 
 class CameraGeometryError(Exception):
     """Base exception for camera geometry calculation failures."""
 
 
 class FocalLengthError(CameraGeometryError):
-    """Raised when focal length cannot be calculated from the given camera parameters."""
+    """Raised when focal length cannot be calculated from camera parameters."""
 
 
 class PixelConversionError(CameraGeometryError):
-    """Raised when a pixel measurement cannot be converted to real-world units."""
+    """Raised when pixel measurements cannot be converted to real-world units."""
 
 
 @dataclass
@@ -95,12 +102,10 @@ class PalletDetection:
         self.camera = camera
         self.focal_length = focal_length
 
-        # Calculate pixel dimensions
         self.height_px = bbox.y2 - bbox.y1
         self.diagonal_width_px = math.hypot(bbox.x2 - bbox.x1, bbox.y2 - bbox.y1)
         self.side_width_px = self.diagonal_width_px / math.sqrt(3)
 
-        # Convert to real-world dimensions using the frame's precomputed focal length
         self.side_width_m = camera.pixel_to_meters(
             self.side_width_px, self.focal_length
         )
@@ -115,8 +120,10 @@ class PalletDetection:
             f"Real-world (at {self.camera.depth_m}m): side_width={self.side_width_m:.3f}m, height={self.height_m:.3f}m"
         )
 
-    def to_csv_row(self, image_name: str, processed_at: str) -> dict[str, str | int | float]:
-        """Converts the detection into a spreadsheet-friendly row."""
+    def to_csv_row(
+        self, image_name: str, processed_at: str
+    ) -> dict[str, str | int | float]:
+        """Converts the detection into a spreadsheet-friendly dictionary."""
         return {
             "image_name": image_name,
             "processed_at": processed_at,
@@ -144,26 +151,32 @@ class PalletDetector:
         conf: float = CONFIDENCE,
         imgsz: int = 640,
     ):
-        try:
-            self.model = YOLO(model_path)
-        except Exception as e:
-            print(f"Error initializing YOLO model: {e}")
-            raise e
-
+        self.model_path = model_path
         self.camera = camera or CameraParameters(
             depth_m=PROTOTYPE_DEPTH_M, horizontal_fov_deg=PROTOTYPE_FOV_DEG
         )
         self.conf = conf
         self.imgsz = imgsz
 
+        # Thread-local storage guarantees each worker thread holds an isolated YOLO instance
+        self._thread_local = threading.local()
+
+    def _get_model(self) -> YOLO:
+        """Retrieves or creates a thread-local instance of the YOLO model."""
+        if not hasattr(self._thread_local, "model"):
+            try:
+                self._thread_local.model = YOLO(self.model_path)
+            except Exception as e:
+                print(f"Error initializing YOLO model on thread {threading.get_ident()}: {e}")
+                raise e
+        return self._thread_local.model
+
     def detect(self, image_path: Path) -> list[PalletDetection]:
         """Runs prediction on an image and returns a list of PalletDetections."""
         try:
-            pil_img = Image.open(image_path)
-            pil_img = ImageOps.exif_transpose(pil_img)
-
-            results = self.model.predict(
-                pil_img,
+            model = self._get_model()
+            results = model.predict(
+                str(image_path),
                 conf=self.conf,
                 iou=0.45,
                 imgsz=self.imgsz,
@@ -189,12 +202,10 @@ class PalletDetector:
                 result.orig_img, focal_length, ARUCO_MARKER_SIZE_M
             )
 
-            # Assign to a local variable instead of altering the shared global reference state
             current_depth = (
                 aruco_depth if aruco_depth is not None else PROTOTYPE_DEPTH_M
             )
 
-            # Instantiate a unique camera parameters instance specifically for this detection frame
             frame_camera = CameraParameters(
                 depth_m=current_depth, horizontal_fov_deg=self.camera.horizontal_fov_deg
             )
@@ -211,8 +222,8 @@ class PalletDetector:
                             bbox=bbox,
                             confidence=confidence,
                             class_id=cls_id,
-                            focal_length=focal_length,  # Reused across all boxes in this frame
-                            camera=frame_camera,  # Pass the safe local frame instance
+                            focal_length=focal_length,
+                            camera=frame_camera,
                         )
                     )
             except (AttributeError, TypeError) as e:
@@ -224,33 +235,58 @@ class PalletDetector:
 
 
 class BatchProcessor:
-    """Manages the process of running detections over multiple files and saving results."""
+    """Manages processing detections across multiple files and saving results."""
 
-    def __init__(self, detector: PalletDetector, output_file: str = "results.csv"):
+    def __init__(
+        self,
+        detector: PalletDetector,
+        output_file: str = "results.csv",
+        max_workers: int = None,
+    ):
         self.detector = detector
         self.output_file = output_file
+        self.max_workers = max_workers or min(8, (os.cpu_count() or 1))
+        self.csv_lock = threading.Lock()
 
     def get_images(self) -> list[Path]:
-        """Returns a sorted list of image paths matching the allowed extensions (.jpg, .jpeg, .png)."""
+        """Returns a sorted list of image paths matching allowed extensions."""
         return sorted(
             p for p in Path("images").glob("*") if p.suffix.lower() in ALLOWED_IMG_EXT
         )
 
+    def _process_single_image(self, image_path: Path, writer: csv.DictWriter):
+        """Worker task: processes an image and writes output under a lock."""
+        detections = self.detector.detect(image_path)
+        processed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        if detections:
+            with self.csv_lock:
+                for detection in detections:
+                    output_line = detection.to_string(image_path.name)
+                    print(output_line)
+                    writer.writerow(
+                        detection.to_csv_row(image_path.name, processed_at)
+                    )
+
     def process(self):
-        """Processes images, prints results, and saves them to the output spreadsheet."""
+        """Processes images, prints results, and writes them to a CSV spreadsheet."""
         image_paths = self.get_images()
 
         try:
             with open(self.output_file, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=RESULT_HEADERS)
                 writer.writeheader()
-                for image_path in image_paths:
-                    detections = self.detector.detect(image_path)
-                    processed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                    for detection in detections:
-                        output_line = detection.to_string(image_path.name)
-                        print(output_line)
-                        writer.writerow(detection.to_csv_row(image_path.name, processed_at))
+
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    futures = [
+                        executor.submit(
+                            self._process_single_image, image_path, writer
+                        )
+                        for image_path in image_paths
+                    ]
+                    for future in as_completed(futures):
+                        future.result()
+
             print(f"Results saved to {self.output_file}")
         except OSError as e:
             print(f"Error during batch processing: {e}")
@@ -259,42 +295,29 @@ class BatchProcessor:
 
 def get_aruco_depth(
     img: np.ndarray, focal_length: float, marker_size_m: float
-) -> float:
-    """Detects a 4x4 ArUco marker in an already-decoded image and returns its depth in meters."""
+) -> float | None:
+    """Detects a 4x4 ArUco marker in an image matrix and returns its depth in meters."""
     if img is None:
         return None
 
-    # Modern OpenCV ArUco setup
-    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    parameters = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(dictionary, parameters)
-
-    corners, ids, _ = detector.detectMarkers(img)
+    corners, ids, _ = ARUCO_DETECTOR.detectMarkers(img)
 
     if ids is not None and len(ids) > 0:
         pts = corners[0][0]
-        # Calculate the pixel size of the first detected marker
         marker_size_px = float(
             np.mean(np.linalg.norm(pts - np.roll(pts, -1, axis=0), axis=1))
         )
 
         if marker_size_px > 0:
-            # Basic depth math: Z = (Real_Size * Focal_Length) / Pixel_Size
             return (marker_size_m * focal_length) / marker_size_px
 
     return None
 
 
 if __name__ == "__main__":
-    # Configure camera parameters
-    # In the future, these would be set based on actual camera specs and deployment conditions
     camera = CameraParameters(
         depth_m=PROTOTYPE_DEPTH_M, horizontal_fov_deg=PROTOTYPE_FOV_DEG
     )
-
-    # Initialize services
     detector = PalletDetector(camera=camera)
     processor = BatchProcessor(detector=detector)
-
-    # Run prediction pipeline
     processor.process()
