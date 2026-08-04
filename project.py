@@ -259,7 +259,7 @@ class BatchProcessor:
     def _process_single_image(self, image_path: Path, writer: csv.DictWriter):
         """Worker task: processes an image and writes output under a lock."""
         detections = self.detector.detect(image_path)
-        processed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        processed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if detections:
             with self.csv_lock:
