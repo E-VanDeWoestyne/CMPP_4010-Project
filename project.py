@@ -240,10 +240,12 @@ class BatchProcessor:
     def __init__(
         self,
         detector: PalletDetector,
+        images_dir: str = "images",
         output_file: str = "results.csv",
         max_workers: int = None,
     ):
         self.detector = detector
+        self.images_dir = Path(images_dir)
         self.output_file = output_file
         self.max_workers = max_workers or min(8, (os.cpu_count() or 1))
         self.csv_lock = threading.Lock()
@@ -251,7 +253,7 @@ class BatchProcessor:
     def get_images(self) -> list[Path]:
         """Returns a sorted list of image paths matching allowed extensions."""
         return sorted(
-            p for p in Path("images").glob("*") if p.suffix.lower() in ALLOWED_IMG_EXT
+            p for p in self.images_dir.glob("*") if p.suffix.lower() in ALLOWED_IMG_EXT
         )
 
     def _process_single_image(self, image_path: Path, writer: csv.DictWriter):
@@ -314,10 +316,37 @@ def get_aruco_depth(
     return None
 
 
+def select_images_directory(default_dir: str = "images") -> str:
+    """Prompts for a folder of images to process, defaulting to `default_dir`."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+
+        default_path = str(Path(default_dir).resolve())
+        selected = filedialog.askdirectory(
+            title="Select folder of images to process",
+            initialdir=default_path if Path(default_dir).exists() else ".",
+        )
+        root.destroy()
+
+        return selected if selected else default_dir
+    except Exception as e:
+        print(f"GUI folder picker unavailable ({e}); falling back to terminal prompt.")
+        entered = input(
+            f"Path to images folder [default: {default_dir}]: "
+        ).strip()
+        return entered if entered else default_dir
+
+
 if __name__ == "__main__":
     camera = CameraParameters(
         depth_m=PROTOTYPE_DEPTH_M, horizontal_fov_deg=PROTOTYPE_FOV_DEG
     )
     detector = PalletDetector(camera=camera)
-    processor = BatchProcessor(detector=detector)
+
+    images_dir = select_images_directory("images")
+    processor = BatchProcessor(detector=detector, images_dir=images_dir)
     processor.process()
